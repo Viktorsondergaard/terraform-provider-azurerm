@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/go-azure-helpers/lang/pointer"
 	"github.com/hashicorp/go-azure-helpers/resourcemanager/commonids"
@@ -108,6 +109,32 @@ func TestAccFunctionAppFlexConsumption_FivePointOhDeploymentStorageIdentityUpdat
 		},
 		data.ImportStep("site_credential.0.password"),
 	})
+}
+
+// TestAccFunctionAppFlexConsumption_FivePointOhRegressionSystemIdentity tests that an app using `SystemAssignedIdentity` storage authentication keeps using it after an update.
+// It uses v5.9.0 as the setup version because it is the last release that wrote `AzureWebJobsStorage` with an empty `AccountKey` when using a managed identity.
+func TestAccFunctionAppFlexConsumption_FivePointOhRegressionSystemIdentity(t *testing.T) {
+	if features.SixPointOh() {
+		t.Skip("Skipping as this resource was removed in 6.0")
+	}
+	data := acceptance.BuildTestData(t, "azurerm_function_app_flex_consumption", "test")
+	r := FunctionAppFlexConsumptionResource{}
+
+	data.ResourceRegressionTest(t, r, []acceptance.TestStep{
+		{
+			Config: r.storageSystemAssignedIdentityFivePointOh(data),
+			Check: acceptance.ComposeTestCheckFunc(
+				check.That(data.ResourceName).ExistsInAzure(r),
+			),
+		},
+		{
+			Config: r.storageSystemAssignedIdentityUpdateFivePointOh(data),
+			Check: acceptance.ComposeTestCheckFunc(
+				check.That(data.ResourceName).ExistsInAzure(r),
+				data.CheckWithClient(r.checkBackendStorageUsesMsi()),
+			),
+		},
+	}, "5.9.0")
 }
 
 func TestAccFunctionAppFlexConsumption_FivePointOhDeploymentStorageUaiUpdate(t *testing.T) {
@@ -988,6 +1015,39 @@ func (r FunctionAppFlexConsumptionResource) Exists(ctx context.Context, client *
 	return pointer.To(resp.Model != nil), nil
 }
 
+func (r FunctionAppFlexConsumptionResource) checkBackendStorageUsesMsi() acceptance.ClientCheckFunc {
+	return func(ctx context.Context, clients *clients.Client, state *pluginsdk.InstanceState) error {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+		}
+
+		id, err := commonids.ParseFunctionAppID(state.ID)
+		if err != nil {
+			return err
+		}
+
+		resp, err := clients.AppService.WebAppsClient.ListApplicationSettings(ctx, *id)
+		if err != nil {
+			return fmt.Errorf("retrieving App Settings for %s: %+v", id, err)
+		}
+		if resp.Model == nil || resp.Model.Properties == nil {
+			return fmt.Errorf("retrieving App Settings for %s: `properties` was nil", id)
+		}
+		appSettings := *resp.Model.Properties
+
+		if _, ok := appSettings["AzureWebJobsStorage"]; ok {
+			return fmt.Errorf("`AzureWebJobsStorage` should not be present in the App Settings for %s", id)
+		}
+		if v := appSettings["AzureWebJobsStorage__accountName"]; v != state.Attributes["backend_storage.0.name"] {
+			return fmt.Errorf("expected `AzureWebJobsStorage__accountName` to be %q for %s, got %q", state.Attributes["backend_storage.0.name"], id, v)
+		}
+
+		return nil
+	}
+}
+
 // remove in 6.0 starts
 func (r FunctionAppFlexConsumptionResource) basicFivePointOh(data acceptance.TestData) string {
 	return fmt.Sprintf(`
@@ -1162,6 +1222,37 @@ resource "azurerm_function_app_flex_consumption" "test" {
   runtime_version             = "20"
   maximum_instance_count      = 50
   instance_memory_in_mb       = 2048
+
+  site_config {}
+}
+`, r.template(data), data.RandomInteger)
+}
+
+func (r FunctionAppFlexConsumptionResource) storageSystemAssignedIdentityUpdateFivePointOh(data acceptance.TestData) string {
+	return fmt.Sprintf(`
+provider "azurerm" {
+  features {}
+}
+
+%s
+
+resource "azurerm_function_app_flex_consumption" "test" {
+  name                = "acctest-LFA-%[2]d"
+  location            = azurerm_resource_group.test.location
+  resource_group_name = azurerm_resource_group.test.name
+  service_plan_id     = azurerm_service_plan.test.id
+
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = "${azurerm_storage_account.test.primary_blob_endpoint}${azurerm_storage_container.test.name}"
+  storage_authentication_type = "SystemAssignedIdentity"
+  runtime_name                = "node"
+  runtime_version             = "20"
+  maximum_instance_count      = 50
+  instance_memory_in_mb       = 2048
+
+  app_settings = {
+    foo = "bar"
+  }
 
   site_config {}
 }

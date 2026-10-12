@@ -1417,18 +1417,31 @@ func flattenStorageConnectionStrings(input webapps.StringDictionary) (backendSaC
 		return
 	}
 
+	var backendSaName string
 	for k, v := range *input.Properties {
 		switch k {
 		case BackendStorageConnStr:
 			backendSaConStr = v
 
 		case BackendStorageName:
-			backendSaConStr = v
-			backendSaUseMsi = true
+			backendSaName = v
 
 		case DeploymentStorageConnStr:
 			deploymentSaConStr = v
 		}
+	}
+
+	// Note: older versions wrote a connection string with an empty `AccountKey` for managed identity storage
+	if strings.Contains(backendSaConStr, "AccountKey=;") {
+		if backendSaName == "" {
+			backendSaName, _ = helpers.ParseWebJobsStorageString(backendSaConStr)
+		}
+		backendSaConStr = ""
+	}
+
+	if backendSaConStr == "" && backendSaName != "" {
+		backendSaConStr = backendSaName
+		backendSaUseMsi = true
 	}
 	return
 }
